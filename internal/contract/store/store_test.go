@@ -209,6 +209,14 @@ func TestLatestAcceptedUsesImmutableManifestHistory(t *testing.T) {
 	if len(latest.Contracts) != 1 {
 		t.Fatalf("latest contracts len = %d, want 1", len(latest.Contracts))
 	}
+
+	accepted, err := st.Accepted(hash1, testOptions(testRoster(signer), "", 0, 1))
+	if err != nil {
+		t.Fatalf("Accepted(hash1): %v", err)
+	}
+	if accepted.ManifestHash != hash1 || accepted.Envelope.Body.Generation != 1 {
+		t.Fatalf("accepted = (%s, gen %d), want gen1 %s", accepted.ManifestHash, accepted.Envelope.Body.Generation, hash1)
+	}
 }
 
 func TestLatestAcceptedSkipsBrokenPriorChain(t *testing.T) {
@@ -240,6 +248,9 @@ func TestLatestAcceptedSkipsBrokenPriorChain(t *testing.T) {
 	}
 	if latest.ManifestHash != hash1 || latest.Envelope.Body.Generation != 1 {
 		t.Fatalf("latest = (%s, gen %d), want gen1 %s", latest.ManifestHash, latest.Envelope.Body.Generation, hash1)
+	}
+	if _, err := st.Accepted(hash3, testOptions(testRoster(signer), "", 0, 1)); !errors.Is(err, ErrContractHistory) {
+		t.Fatalf("Accepted(broken-chain) err = %v, want ErrContractHistory", err)
 	}
 }
 
