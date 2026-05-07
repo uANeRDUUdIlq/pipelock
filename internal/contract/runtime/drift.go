@@ -67,9 +67,20 @@ type OpportunityMissing struct {
 // three clauses: enough missed windows, observed opportunity, and healthy
 // opportunity telemetry. Opportunity suppression emits opportunity_missing and
 // deliberately does not auto-demote.
+//
+// Mode is required — empty mode is fail-closed input. Without this, an
+// observation that omits Mode silently becomes ModeLive in the emitted
+// DriftEvent, which causes SignalForDrift to fire session.SignalBlock and
+// push adaptive enforcement from a path the operator did not opt into.
 func EvaluateDrift(obs DriftObservation) (DriftResult, error) {
 	if obs.KillSwitchActive {
 		return DriftResult{Suppressed: true}, nil
+	}
+	if obs.Mode == "" {
+		return DriftResult{}, fmt.Errorf("%w: mode required", ErrInvalidDecisionInput)
+	}
+	if !validMode(obs.Mode) {
+		return DriftResult{}, fmt.Errorf("%w: mode %q", ErrInvalidDecisionInput, obs.Mode)
 	}
 	if err := validateLifecycle(obs.Rule.LifecycleState); err != nil {
 		return DriftResult{}, err
@@ -105,7 +116,7 @@ func EvaluateDrift(obs DriftObservation) (DriftResult, error) {
 			ContractHash:       obs.ContractHash,
 			RuleID:             obs.Rule.RuleID,
 			Kind:               DriftKindPositive,
-			Mode:               effectiveMode(obs.Mode),
+			Mode:               obs.Mode,
 			Action:             config.ActionBlock,
 			ObservationSummary: "unexpected observation outside enforced contract",
 			OpportunityStatus:  "healthy",
@@ -125,7 +136,7 @@ func EvaluateDrift(obs DriftObservation) (DriftResult, error) {
 			ContractHash:      obs.ContractHash,
 			RuleID:            obs.Rule.RuleID,
 			Kind:              DriftKindNegative,
-			Mode:              effectiveMode(obs.Mode),
+			Mode:              obs.Mode,
 			MissedWindows:     obs.MissedWindows,
 			OpportunityStatus: "healthy",
 		}
@@ -179,16 +190,12 @@ func observationUint(m map[string]any, key string) uint64 {
 	}
 }
 
-func effectiveMode(mode Mode) Mode {
-	if mode == "" {
-		return ModeLive
-	}
-	return mode
-}
-
 // SignalForDrift returns the live adaptive signal implied by a drift event.
+// The signal fires only when DriftEvent.Mode is exactly ModeLive — empty mode,
+// ModeShadow, and ModeCapture all return nil so observation paths cannot push
+// adaptive enforcement.
 func SignalForDrift(event DriftEvent) *session.SignalType {
-	if event.Kind == DriftKindPositive && effectiveMode(event.Mode) == ModeLive && event.Action == config.ActionBlock {
+	if event.Mode == ModeLive && event.Kind == DriftKindPositive && event.Action == config.ActionBlock {
 		sig := session.SignalBlock
 		return &sig
 	}

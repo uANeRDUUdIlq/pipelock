@@ -22,17 +22,15 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/session"
 )
 
+// Lifecycle constants alias the canonical schema-package values so the
+// runtime and the contract validator share one source of truth. Adding
+// a new lifecycle state must happen in the contract package.
 const (
-	// LifecycleProposed means the rule is visible to operators but not active.
-	LifecycleProposed = "proposed"
-	// LifecycleCaptureOnly records telemetry without changing live enforcement.
-	LifecycleCaptureOnly = "capture_only"
-	// LifecycleEnforce allows the rule to affect live decisions.
-	LifecycleEnforce = "enforce"
-	// LifecycleExpired marks a rule as no longer active.
-	LifecycleExpired = "expired"
-	// LifecycleDemoted marks a rule removed from enforcement by drift handling.
-	LifecycleDemoted = "demoted"
+	LifecycleProposed    = contract.LifecycleProposed
+	LifecycleCaptureOnly = contract.LifecycleCaptureOnly
+	LifecycleEnforce     = contract.LifecycleEnforce
+	LifecycleExpired     = contract.LifecycleExpired
+	LifecycleDemoted     = contract.LifecycleDemoted
 )
 
 const (
@@ -55,9 +53,14 @@ const (
 	WinningSourceKillSwitch = PolicySourceKillSwitch
 )
 
+// Rule-kind aliases keep the runtime in lock-step with the validator's
+// EnforceableRuleKinds() registry. Adding a new kind requires updating
+// both the contract package's enforceable list AND the runtime evaluator
+// dispatch in the same change; otherwise validation rejects enforced
+// rules of that kind.
 const (
-	ruleKindHTTPDestination = "http_destination"
-	ruleKindHTTPAction      = "http_action"
+	ruleKindHTTPDestination = contract.RuleKindHTTPDestination
+	ruleKindHTTPAction      = contract.RuleKindHTTPAction
 
 	DriftKindPositive = "positive"
 	DriftKindNegative = "negative"
@@ -67,8 +70,10 @@ var (
 	// ErrNoResolvedContract is returned when a caller asks for evaluation
 	// without an active contract pin.
 	ErrNoResolvedContract = errors.New("contract runtime: no resolved contract")
-	// ErrUnsupportedLifecycle is returned for non-enumerated rule states.
-	ErrUnsupportedLifecycle = errors.New("contract runtime: unsupported lifecycle state")
+	// ErrUnsupportedLifecycle aliases the contract package's lifecycle
+	// error so a single sentinel works for validation-time and
+	// evaluation-time rejection.
+	ErrUnsupportedLifecycle = contract.ErrUnsupportedLifecycle
 	// ErrInvalidDecisionInput is returned for malformed request/evaluation input.
 	ErrInvalidDecisionInput = errors.New("contract runtime: invalid decision input")
 	// ErrInvalidSelector is returned when an active-set selector cannot be used safely.
@@ -264,8 +269,20 @@ type EvaluateOptions struct {
 }
 
 // Decision is the contract-aware verdict metadata for a request.
+//
+// Verdict is what the proxy MUST act on for this request — block or allow.
+// LiveVerdict is what live mode WOULD have done given the same inputs:
+// in ModeLive these are equal; in ModeShadow / ModeCapture, Verdict
+// reflects the scanner-floor result (so the proxy never blocks more than
+// scanner already would) while LiveVerdict surfaces the contract's
+// would-have-been verdict for drift signalling and audit.
+//
+// WinningSource names the source that decided Verdict (kill_switch,
+// scanner, contract). Drift carries the contract-attributed event when
+// the contract path produced a non-allow verdict in any mode.
 type Decision struct {
 	Verdict       string
+	LiveVerdict   string
 	PolicySources []string
 	WinningSource string
 	RuleID        string
@@ -275,34 +292,116 @@ type Decision struct {
 	Reason        string
 }
 
-// EvaluateHTTP evaluates active HTTP destination/action rules. It implements
-// host-scoped deny-default: only hosts with comparable enforce rules can be
-// denied by contract default.
+// EvaluateHTTP returns the runtime verdict for an HTTP request under the
+// active learn-and-lock contract. The decision sequence is:
+//
+//  1. Mode is required and must enumerate. Empty Mode is fail-closed input.
+//  2. Kill switch active → block in every mode (absolute floor).
+//  3. Scanner block → block in every mode (security floor; contract may not
+//     resurrect a scanner-blocked request, including a signed allow rule).
+//  4. No resolved contract → return the scanner verdict.
+//  5. Contract resolved → evaluate enforce rules:
+//     - Allow rule matches → contract annotates the (already-allowed)
+//     scanner verdict; WinningSource = contract.
+//     - Contract has zero enforce rules anywhere → fall through to
+//     scanner (observation-only contract; no jurisdiction).
+//     - Otherwise → contract default-deny (the contract claims
+//     jurisdiction once any rule is in enforce; traffic outside the
+//     enumerated allow set is denied).
+//  6. Mode gate. ModeLive enforces the contract verdict directly.
+//     ModeShadow / ModeCapture surface the scanner verdict as Verdict
+//     (so the proxy never blocks more than scanner already would) while
+//     LiveVerdict carries what live mode would have done, plus the drift
+//     event for observation pipelines.
+//
+// The proxy MUST act on Decision.Verdict. LiveVerdict and Drift are
+// audit/telemetry surface; using them for enforcement breaks the mode
+// guarantee.
 func EvaluateHTTP(opts EvaluateOptions) (Decision, error) {
+	if opts.Mode == "" {
+		return Decision{}, fmt.Errorf("%w: mode required", ErrInvalidDecisionInput)
+	}
+	if !validMode(opts.Mode) {
+		return Decision{}, fmt.Errorf("%w: mode %q", ErrInvalidDecisionInput, opts.Mode)
+	}
+
 	sources := normalizePolicySources(opts.PolicySources)
 	if opts.ScannerMatched || opts.ScannerVerdict != "" {
 		sources = appendPolicySource(sources, PolicySourceScanner)
 	}
+
+	// 1. Kill switch is the absolute floor. Block in every mode.
 	if opts.KillSwitchActive {
 		sources = appendPolicySource(sources, PolicySourceKillSwitch)
 		return Decision{
 			Verdict:       config.ActionBlock,
+			LiveVerdict:   config.ActionBlock,
 			PolicySources: sources,
 			WinningSource: WinningSourceKillSwitch,
 			Suppressed:    true,
 			Reason:        "kill_switch_active",
 		}, nil
 	}
-	if opts.Resolved == nil {
-		return scannerDecision(opts.ScannerVerdict, sources), nil
+
+	// Resolve scanner verdict (fail-closed if scanner did not decide).
+	scannerVerdict := opts.ScannerVerdict
+	scannerMissing := scannerVerdict == ""
+	if scannerMissing {
+		scannerVerdict = config.ActionBlock
 	}
+
+	// 2. Scanner block is the security floor. Wins in every mode, including
+	// over a signed contract-allow rule. Without this, a contract becomes a
+	// signed bypass of DLP / SSRF / blocklist.
+	if scannerVerdict == config.ActionBlock {
+		sources = appendPolicySource(sources, PolicySourceScanner)
+		decision := Decision{
+			Verdict:       config.ActionBlock,
+			LiveVerdict:   config.ActionBlock,
+			PolicySources: sources,
+			WinningSource: WinningSourceScanner,
+		}
+		if scannerMissing {
+			decision.Reason = "scanner_decision_missing"
+		}
+		return decision, nil
+	}
+
+	// 3. No resolved contract → scanner verdict stands.
+	if opts.Resolved == nil {
+		return Decision{
+			Verdict:       scannerVerdict,
+			LiveVerdict:   scannerVerdict,
+			PolicySources: sources,
+			WinningSource: WinningSourceScanner,
+		}, nil
+	}
+
 	sources = appendPolicySource(sources, PolicySourceContract)
+
+	// 4 + 5. Compute the live verdict from the contract.
+	live, err := evaluateContractLive(opts, sources, scannerVerdict)
+	if err != nil {
+		return Decision{}, err
+	}
+
+	// 6. Mode gate.
+	return applyModeGate(live, opts.Mode, scannerVerdict, sources), nil
+}
+
+// evaluateContractLive returns what live mode would do for opts given a
+// resolved contract, after kill-switch and scanner-block have been ruled out.
+// Scanner verdict at this point is non-block; it is passed in so a contract
+// allow can correctly annotate the scanner verdict instead of asserting an
+// allow that scanner did not approve.
+func evaluateContractLive(opts EvaluateOptions, sources []string, scannerVerdict string) (Decision, error) {
 	u, err := url.Parse(opts.Request.URL)
 	if err != nil || u.Hostname() == "" {
 		return Decision{}, fmt.Errorf("%w: url", ErrInvalidDecisionInput)
 	}
 
 	hostHasEnforceRule := false
+	contractHasEnforceRule := false
 	hasComparableEvidence := false
 	hostRuleIDs := make([]string, 0)
 	seenRuleIDs := map[string]struct{}{}
@@ -316,6 +415,7 @@ func EvaluateHTTP(opts EvaluateOptions) (Decision, error) {
 		if rule.LifecycleState != LifecycleEnforce {
 			continue
 		}
+		contractHasEnforceRule = true
 		if !ruleHostMatches(rule, u.Hostname()) {
 			continue
 		}
@@ -333,35 +433,73 @@ func EvaluateHTTP(opts EvaluateOptions) (Decision, error) {
 		}
 		hasComparableEvidence = true
 		if matches {
+			// Contract allow annotates the scanner-allowed verdict.
+			// Scanner block has already been resolved upstream and
+			// cannot reach this point, so it is impossible for an
+			// allow rule to override a scanner block here.
 			return Decision{
-				Verdict:       config.ActionAllow,
+				Verdict:       scannerVerdict,
+				LiveVerdict:   scannerVerdict,
 				PolicySources: sources,
 				WinningSource: WinningSourceContract,
 				RuleID:        rule.RuleID,
 			}, nil
 		}
 	}
-	if hostHasEnforceRule && hasComparableEvidence {
-		return contractBlockDecision(opts, sources, firstString(hostRuleIDs), "contract_enforce_default"), nil
+
+	// No allow rule matched.
+	if !contractHasEnforceRule {
+		// Contract is observation-only (zero enforce rules anywhere). It
+		// claims no jurisdiction; scanner verdict stands.
+		return Decision{
+			Verdict:       scannerVerdict,
+			LiveVerdict:   scannerVerdict,
+			PolicySources: sources,
+			WinningSource: WinningSourceScanner,
+		}, nil
 	}
-	return scannerDecision(opts.ScannerVerdict, sources), nil
+
+	reason := "contract_default_deny"
+	ruleID := ""
+	if hostHasEnforceRule && hasComparableEvidence {
+		reason = "contract_enforce_default"
+		ruleID = firstString(hostRuleIDs)
+	}
+	return contractBlockDecision(opts, sources, ruleID, reason), nil
 }
 
-func scannerDecision(scannerVerdict string, sources []string) Decision {
-	missing := scannerVerdict == ""
-	if scannerVerdict == "" {
-		scannerVerdict = config.ActionBlock
+// applyModeGate adapts a live-mode decision to the configured mode.
+// ModeLive returns it unchanged. ModeShadow and ModeCapture surface the
+// scanner verdict as the enforced Verdict (so the proxy never blocks more
+// than scanner already would) and carry the live verdict + drift event
+// for telemetry. SignalForDrift gates the adaptive signal on
+// DriftEvent.Mode == ModeLive directly, so shadow/capture never emit
+// the live block signal even when Drift is populated.
+func applyModeGate(live Decision, mode Mode, scannerVerdict string, sources []string) Decision {
+	if mode == ModeLive {
+		return live
 	}
-	sources = appendPolicySource(sources, PolicySourceScanner)
-	decision := Decision{
+	out := Decision{
 		Verdict:       scannerVerdict,
+		LiveVerdict:   live.Verdict,
 		PolicySources: sources,
 		WinningSource: WinningSourceScanner,
+		RuleID:        live.RuleID,
+		Drift:         live.Drift,
 	}
-	if missing {
-		decision.Reason = "scanner_decision_missing"
+	if live.WinningSource == WinningSourceContract {
+		out.Reason = "contract_observed_only"
 	}
-	return decision
+	return out
+}
+
+func validMode(mode Mode) bool {
+	switch mode {
+	case ModeLive, ModeShadow, ModeCapture:
+		return true
+	default:
+		return false
+	}
 }
 
 func contractBlockDecision(opts EvaluateOptions, sources []string, ruleID, reason string) Decision {
@@ -369,11 +507,12 @@ func contractBlockDecision(opts EvaluateOptions, sources []string, ruleID, reaso
 		ContractHash: opts.Resolved.ContractHash,
 		RuleID:       ruleID,
 		Kind:         DriftKindPositive,
-		Mode:         effectiveMode(opts.Mode),
+		Mode:         opts.Mode,
 		Action:       config.ActionBlock,
 	}
 	decision := Decision{
 		Verdict:       config.ActionBlock,
+		LiveVerdict:   config.ActionBlock,
 		PolicySources: sources,
 		WinningSource: WinningSourceContract,
 		RuleID:        ruleID,

@@ -16,6 +16,24 @@ const SchemaVersionContract = 1
 // ContractKind is the only valid contract_kind value for v2.4.
 const ContractKind = "behavioral_contract"
 
+// Rule lifecycle states. The runtime evaluator only honors LifecycleEnforce
+// for live decisions; other states observe or are inert.
+const (
+	LifecycleProposed    = "proposed"
+	LifecycleCaptureOnly = "capture_only"
+	LifecycleEnforce     = "enforce"
+	LifecycleExpired     = "expired"
+	LifecycleDemoted     = "demoted"
+)
+
+// Rule kinds enforceable by the v1 contract runtime. New kinds must land
+// in the runtime evaluator AND in EnforceableRuleKinds() in the same change;
+// otherwise they fail validation in LifecycleEnforce state.
+const (
+	RuleKindHTTPDestination = "http_destination"
+	RuleKindHTTPAction      = "http_action"
+)
+
 // ErrContractSchemaVersion rejects contracts with non-current schema_version.
 var ErrContractSchemaVersion = errors.New("contract: unsupported schema_version")
 
@@ -25,6 +43,48 @@ var ErrContractKind = errors.New("contract: invalid contract_kind")
 // ErrCaptureGrade rejects rules that claim enforcement without sufficient
 // capture-surface evidence.
 var ErrCaptureGrade = errors.New("contract: invalid capture grade")
+
+// ErrUnenforceableRuleKind rejects rules in LifecycleEnforce state whose
+// rule_kind is not in EnforceableRuleKinds(). Rules in non-enforce states
+// (proposed, capture_only, expired, demoted) may carry forward-compatible
+// kinds; only enforced rules are gated.
+var ErrUnenforceableRuleKind = errors.New("contract: rule_kind not enforceable in this schema version")
+
+// ErrUnsupportedLifecycle rejects rules whose lifecycle_state is not in the
+// enumerated set. Without this gate a typo (e.g. "enforce ", "enabled")
+// silently falls through every state-keyed branch — the rule-kind validator
+// only runs on the literal LifecycleEnforce string, so a poisoned lifecycle
+// can carry a rule that was meant to be enforced and turn it into runtime
+// dead code.
+var ErrUnsupportedLifecycle = errors.New("contract: unsupported lifecycle_state")
+
+// EnforceableRuleKinds returns the rule kinds the v1 runtime can evaluate
+// for live enforcement. The validator uses this to gate
+// LifecycleEnforce rules so a contract cannot ship enforced rules the
+// runtime would silently ignore. Add a new kind here only when the
+// matching runtime evaluator branch lands in the same change.
+func EnforceableRuleKinds() []string {
+	return []string{RuleKindHTTPDestination, RuleKindHTTPAction}
+}
+
+func ruleKindEnforceable(kind string) bool {
+	for _, k := range EnforceableRuleKinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// validLifecycle reports whether state is one of the enumerated values.
+func validLifecycle(state string) bool {
+	switch state {
+	case LifecycleProposed, LifecycleCaptureOnly, LifecycleEnforce, LifecycleExpired, LifecycleDemoted:
+		return true
+	default:
+		return false
+	}
+}
 
 // Capture-grade values describe how much scanner evidence backed a rule.
 const (
@@ -154,6 +214,12 @@ func (c Contract) Validate() error {
 	if !ok {
 		return fmt.Errorf("contract body is not a map after marshal+parse")
 	}
+	if err := validateRuleLifecycles(c.Rules); err != nil {
+		return err
+	}
+	if err := validateRuleKinds(c.Rules); err != nil {
+		return err
+	}
 	if err := validateRuleCaptureGrades(c.Rules); err != nil {
 		return err
 	}
@@ -162,6 +228,38 @@ func (c Contract) Validate() error {
 		fcls[k] = v
 	}
 	return ValidateDataClassCoverage(bodyMap, fcls)
+}
+
+func validateRuleLifecycles(rules []Rule) error {
+	for i, rule := range rules {
+		if !validLifecycle(rule.LifecycleState) {
+			return fmt.Errorf(
+				"%w: rules[%d] lifecycle_state %q",
+				ErrUnsupportedLifecycle,
+				i,
+				rule.LifecycleState,
+			)
+		}
+	}
+	return nil
+}
+
+func validateRuleKinds(rules []Rule) error {
+	for i, rule := range rules {
+		if rule.LifecycleState != LifecycleEnforce {
+			continue
+		}
+		if !ruleKindEnforceable(rule.RuleKind) {
+			return fmt.Errorf(
+				"%w: rules[%d] kind %q (enforceable: %v)",
+				ErrUnenforceableRuleKind,
+				i,
+				rule.RuleKind,
+				EnforceableRuleKinds(),
+			)
+		}
+	}
+	return nil
 }
 
 func validateRuleCaptureGrades(rules []Rule) error {
@@ -182,7 +280,7 @@ func validateRuleCaptureGrades(rules []Rule) error {
 		if !validCaptureGrade(observed) {
 			return fmt.Errorf("%w: rules[%d] invalid observed_capture_grade %q", ErrCaptureGrade, i, observed)
 		}
-		if rule.LifecycleState == "enforce" && compareCaptureGrade(observed, required) < 0 {
+		if rule.LifecycleState == LifecycleEnforce && compareCaptureGrade(observed, required) < 0 {
 			return fmt.Errorf(
 				"%w: rules[%d] enforce requires %s evidence, observed %s",
 				ErrCaptureGrade,
@@ -196,7 +294,7 @@ func validateRuleCaptureGrades(rules []Rule) error {
 }
 
 func effectiveCaptureGrades(rule Rule) (string, string) {
-	if rule.LifecycleState == "capture_only" && rule.RequiredCaptureGrade == "" && rule.ObservedCaptureGrade == "" {
+	if rule.LifecycleState == LifecycleCaptureOnly && rule.RequiredCaptureGrade == "" && rule.ObservedCaptureGrade == "" {
 		return CaptureGradeFull, CaptureGradeFull
 	}
 	return rule.RequiredCaptureGrade, rule.ObservedCaptureGrade
