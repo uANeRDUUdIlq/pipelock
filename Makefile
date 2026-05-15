@@ -15,7 +15,7 @@ LDFLAGS := -ldflags "-s -w \
 	-X $(MODULE)/internal/license.PublicKeyHex=$(LICENSE_PUBLIC_KEY) \
 	-X $(MODULE)/internal/rules.KeyringHex=$(RULES_KEYRING_HEX)"
 
-.PHONY: all build build-verifier test bench lint clean docker install fmt vet tidy-check fuzz stats docs-check \
+.PHONY: all build build-verifier test bench bench-egress bench-egress-long bench-egress-release lint clean docker install fmt vet tidy-check fuzz stats docs-check \
 	test-runtime-critical test-replay-harness release-audit runtime-policy-audit debt-check release-check
 
 all: build
@@ -56,6 +56,15 @@ test-cover:
 
 bench:
 	go test -bench=. -benchmem -count=3 -run=^$$ ./internal/scanner/ ./internal/mcp/
+
+bench-egress:
+	bash bench/egress/run-all.sh
+
+bench-egress-long:
+	bash bench/egress/run-all.sh --long
+
+bench-egress-release:
+	bash bench/egress/run-all.sh --release
 
 fmt:
 	gofumpt -w .
