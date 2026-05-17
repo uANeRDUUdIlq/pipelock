@@ -129,6 +129,10 @@ func coreResponsePatternDefs() []coreResponsePattern {
 			regex: `(?is)\b(send|provide|paste|return|include|supply|submit|share)\b.{0,80}\b(password|passwd|token|api[_ -]?key|secret|credential|private[_ -]?key|ssh[_ -]?key|session[_ -]?cookie)\b`,
 		},
 		{
+			name:  "System Prompt Disclosure",
+			regex: `(?is)\b(output|print|reveal|show|display|dump|return|exfiltrate)\b.{0,80}\b(system\s+prompt|tool\s+definitions?|developer\s+instructions?)\b`,
+		},
+		{
 			name:  "Credential Path Directive",
 			regex: `(?is)\b(read|get|fetch|retrieve|cat|copy|extract|open)\b.{0,80}(\.ssh[/\\]|\.aws[/\\]credentials|\.env\b|\.npmrc\b|\.pypirc\b|\.netrc\b|\bid_rsa\b|\bid_ed25519\b|\bkubeconfig\b|/etc/passwd\b|/etc/shadow\b)`,
 		},
@@ -280,14 +284,18 @@ func initCoreScanner() *compiledCoreScanner {
 // Returns matches found by core patterns only; the caller should run the main
 // response scanner separately if enabled.
 func (s *Scanner) ScanCoreResponse(ctx context.Context, content string) []ResponseMatch {
+	return s.scanCoreResponse(ctx, content).matches
+}
+
+func (s *Scanner) scanCoreResponse(ctx context.Context, content string) responseMatchSet {
 	if s.core == nil {
-		return nil
+		return responseMatchSet{}
 	}
 	if ctx != nil && ctx.Err() != nil {
-		return []ResponseMatch{{
+		return responseMatchSet{matches: []ResponseMatch{{
 			PatternName: "context_canceled",
 			MatchText:   ctx.Err().Error(),
-		}}
+		}}, content: normalize.ForMatching(content)}
 	}
 
 	original := content
@@ -295,14 +303,14 @@ func (s *Scanner) ScanCoreResponse(ctx context.Context, content string) []Respon
 
 	// Primary pass.
 	if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, content); len(matches) > 0 {
-		return matches
+		return responseMatchSet{matches: matches, content: content}
 	}
 
 	// Secondary: replace invisible chars with spaces.
 	spaced := normalize.ForMatching(normalize.ReplaceInvisibleWithSpace(original))
 	if spaced != content {
 		if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, spaced); len(matches) > 0 {
-			return matches
+			return responseMatchSet{matches: matches, content: spaced}
 		}
 	}
 
@@ -310,14 +318,14 @@ func (s *Scanner) ScanCoreResponse(ctx context.Context, content string) []Respon
 	leeted := normalize.Leetspeak(content)
 	if leeted != content {
 		if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, leeted); len(matches) > 0 {
-			return matches
+			return responseMatchSet{matches: matches, content: leeted}
 		}
 	}
 
 	// Quaternary: optional-whitespace matching.
 	if len(s.core.responseOptSpacePatterns) > 0 {
 		if matches := matchPatternsPreFiltered(s.core.responseOptSpacePreFilter, s.core.responseOptSpacePatterns, content); len(matches) > 0 {
-			return matches
+			return responseMatchSet{matches: matches, content: content}
 		}
 	}
 
@@ -326,33 +334,33 @@ func (s *Scanner) ScanCoreResponse(ctx context.Context, content string) []Respon
 		folded := normalize.FoldVowels(content)
 		if folded != content {
 			if matches := matchPatternsPreFiltered(s.core.responseVowelFoldPreFilter, s.core.responseVowelFoldPatterns, folded); len(matches) > 0 {
-				return matches
+				return responseMatchSet{matches: matches, content: folded}
 			}
 		}
 	}
 
 	// Senary: base64/hex decode pass for encoded injection payloads.
 	if hasEncodedRun(content) {
-		if matches := s.matchDecodedCoreResponse(content); len(matches) > 0 {
-			return matches
+		if decodedSet := s.matchDecodedCoreResponse(content); len(decodedSet.matches) > 0 {
+			return decodedSet
 		}
 	}
 
-	return nil
+	return responseMatchSet{}
 }
 
 // matchDecodedCoreResponse tries base64/hex decoding content and checks the
 // decoded result against core response patterns. Entry point for the senary pass.
-func (s *Scanner) matchDecodedCoreResponse(content string) []ResponseMatch {
+func (s *Scanner) matchDecodedCoreResponse(content string) responseMatchSet {
 	return s.matchDecodedCoreResponseRecursive(content, 0)
 }
 
 // matchDecodedCoreResponseRecursive is the recursive implementation of
 // matchDecodedCoreResponse. Mirrors the main scanner's matchDecodedResponseRecursive
 // but uses only core response patterns.
-func (s *Scanner) matchDecodedCoreResponseRecursive(content string, depth int) []ResponseMatch {
+func (s *Scanner) matchDecodedCoreResponseRecursive(content string, depth int) responseMatchSet {
 	if depth >= responseDecodeMaxDepth {
-		return nil
+		return responseMatchSet{}
 	}
 
 	// Strategy 1: whole-content decode (strip whitespace first).
@@ -369,23 +377,21 @@ func (s *Scanner) matchDecodedCoreResponseRecursive(content string, depth int) [
 	} {
 		if decoded, err := enc.DecodeString(stripped); err == nil && len(decoded) > 0 {
 			d := string(decoded)
-			normalized := normalize.ForMatching(d)
-			if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized); len(matches) > 0 {
-				return matches
+			if decodedSet := s.matchDecodedCoreNormalized(d); len(decodedSet.matches) > 0 {
+				return decodedSet
 			}
-			if matches := s.matchDecodedCoreResponseRecursive(d, depth+1); len(matches) > 0 {
-				return matches
+			if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1); len(decodedSet.matches) > 0 {
+				return decodedSet
 			}
 		}
 	}
 	if decoded, err := hex.DecodeString(stripped); err == nil && len(decoded) > 0 {
 		d := string(decoded)
-		normalized := normalize.ForMatching(d)
-		if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized); len(matches) > 0 {
-			return matches
+		if decodedSet := s.matchDecodedCoreNormalized(d); len(decodedSet.matches) > 0 {
+			return decodedSet
 		}
-		if matches := s.matchDecodedCoreResponseRecursive(d, depth+1); len(matches) > 0 {
-			return matches
+		if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1); len(decodedSet.matches) > 0 {
+			return decodedSet
 		}
 	}
 
@@ -398,28 +404,34 @@ func (s *Scanner) matchDecodedCoreResponseRecursive(content string, depth int) [
 		} {
 			if decoded, err := enc.DecodeString(seg); err == nil && len(decoded) > 0 && isPrintableText(decoded) {
 				d := string(decoded)
-				normalized := normalize.ForMatching(d)
-				if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized); len(matches) > 0 {
-					return matches
+				if decodedSet := s.matchDecodedCoreNormalized(d); len(decodedSet.matches) > 0 {
+					return decodedSet
 				}
-				if matches := s.matchDecodedCoreResponseRecursive(d, depth+1); len(matches) > 0 {
-					return matches
+				if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1); len(decodedSet.matches) > 0 {
+					return decodedSet
 				}
 			}
 		}
 		if decoded, err := hex.DecodeString(seg); err == nil && len(decoded) > 0 && isPrintableText(decoded) {
 			d := string(decoded)
-			normalized := normalize.ForMatching(d)
-			if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized); len(matches) > 0 {
-				return matches
+			if decodedSet := s.matchDecodedCoreNormalized(d); len(decodedSet.matches) > 0 {
+				return decodedSet
 			}
-			if matches := s.matchDecodedCoreResponseRecursive(d, depth+1); len(matches) > 0 {
-				return matches
+			if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1); len(decodedSet.matches) > 0 {
+				return decodedSet
 			}
 		}
 	}
 
-	return nil
+	return responseMatchSet{}
+}
+
+func (s *Scanner) matchDecodedCoreNormalized(decoded string) responseMatchSet {
+	normalized := normalize.ForMatching(decoded)
+	if matches := matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized); len(matches) > 0 {
+		return responseMatchSet{matches: matches, content: normalized}
+	}
+	return responseMatchSet{}
 }
 
 // scanCoreDLP runs core DLP patterns against text. Returns matches found by
@@ -458,6 +470,9 @@ func (s *Scanner) scanCoreDLP(text string) []TextDLPMatch {
 	// Recursive encoding decode: try base64, hex, base32 and re-check
 	// core DLP patterns on decoded content. Catches base64(secret), hex(secret).
 	matches = append(matches, s.decodeAndMatchCoreRecursive(cleaned, 0)...)
+	if len(matches) == 0 {
+		matches = append(matches, s.decodeCoreDLPTextSegments(cleaned)...)
+	}
 
 	return deduplicateMatches(matches)
 }
@@ -522,6 +537,25 @@ func (s *Scanner) decodeAndMatchCoreRecursive(text string, depth int) []TextDLPM
 		matches = append(matches, s.decodeAndMatchCoreRecursive(d, depth+1)...)
 	}
 
+	return matches
+}
+
+func (s *Scanner) decodeCoreDLPTextSegments(text string) []TextDLPMatch {
+	var matches []TextDLPMatch
+	for _, seg := range strings.FieldsFunc(text, isTextDLPEncodingDelimiter) {
+		if len(seg) < 10 {
+			continue
+		}
+		for _, d := range decodeEncodings(seg) {
+			if m := s.matchCoreDLPPatterns(d.text, d.encoding); len(m) > 0 {
+				return m
+			}
+		}
+		if m := s.decodeAndMatchCoreRecursive(seg, 0); len(m) > 0 {
+			matches = append(matches, m...)
+			return matches
+		}
+	}
 	return matches
 }
 
