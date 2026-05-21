@@ -56,7 +56,7 @@ func TestPrometheusHandler(t *testing.T) {
 	m.RecordAllowed(100*time.Millisecond, testAgent)
 	m.RecordBlocked("evil.com", "dlp", 50*time.Millisecond, testAgent)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	m.PrometheusHandler().ServeHTTP(w, req)
 
@@ -93,7 +93,7 @@ func TestStatsHandler(t *testing.T) {
 	m.RecordAllowed(200*time.Millisecond, testAgent)
 	m.RecordBlocked("evil.com", "dlp", 50*time.Millisecond, testAgent)
 
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/stats", nil)
 	w := httptest.NewRecorder()
 	m.StatsHandler().ServeHTTP(w, req)
 
@@ -134,7 +134,7 @@ func TestStatsHandler_BlockRate(t *testing.T) {
 	m.RecordAllowed(10*time.Millisecond, testAgent)
 	m.RecordBlocked("x.com", "dlp", 10*time.Millisecond, testAgent)
 
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/stats", nil)
 	w := httptest.NewRecorder()
 	m.StatsHandler().ServeHTTP(w, req)
 
@@ -150,7 +150,7 @@ func TestStatsHandler_BlockRate(t *testing.T) {
 func TestStatsHandler_Empty(t *testing.T) {
 	m := New()
 
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/stats", nil)
 	w := httptest.NewRecorder()
 	m.StatsHandler().ServeHTTP(w, req)
 
@@ -254,7 +254,7 @@ func TestRecordSessionAnomaly(t *testing.T) {
 	m.RecordSessionAnomaly("domain_burst")
 	m.RecordSessionAnomaly("volume_spike")
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	m.PrometheusHandler().ServeHTTP(w, req)
 

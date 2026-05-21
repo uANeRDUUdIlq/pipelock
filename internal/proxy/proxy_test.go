@@ -1635,7 +1635,9 @@ func TestFetchEndpoint_LiveLockRedirectChainCapStillApplies(t *testing.T) {
 	var redirects int
 	origin := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirects++
-		http.Redirect(w, r, r.URL.Path+"x", http.StatusFound)
+		// Test fixture exercises pipelock's redirect-chain cap — the redirect target
+		// is deliberately under attacker control.
+		http.Redirect(w, r, r.URL.Path+"x", http.StatusFound) //nolint:gosec // G710: test fixture, attacker-controlled redirect is intentional
 	}))
 	defer origin.Close()
 
@@ -1781,7 +1783,7 @@ func TestFetchEndpoint_RedirectChainExceedsMax(t *testing.T) {
 	var redirectCount int
 	backend := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirectCount++
-		http.Redirect(w, r, r.URL.Path+"x", http.StatusFound)
+		http.Redirect(w, r, r.URL.Path+"x", http.StatusFound) //nolint:gosec // G710: test fixture, attacker-controlled redirect is intentional
 	}))
 	defer backend.Close()
 

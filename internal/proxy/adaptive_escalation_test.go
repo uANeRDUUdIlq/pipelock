@@ -127,7 +127,7 @@ func TestForwardHTTP_Adaptive_BlockAll(t *testing.T) {
 	escalateRec(rec, 1)
 
 	// Send a clean absolute-URI forward request.
-	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/ok", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/ok", nil)
 	w := httptest.NewRecorder()
 
 	handler := p.buildHandler(http.NewServeMux())
@@ -169,7 +169,7 @@ func TestForwardHTTP_Adaptive_WarnUpgradeToBlock(t *testing.T) {
 	// Send a request with an AWS key in the URL (DLP finding, audit mode = warn).
 	// Build the key at runtime to avoid gosec G101.
 	dlpURL := upstream.URL + "/text?key=" + "AKIA" + "IOSFODNN7EXAMPLE"
-	req := httptest.NewRequest(http.MethodGet, dlpURL, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, dlpURL, nil)
 	w := httptest.NewRecorder()
 
 	handler := p.buildHandler(http.NewServeMux())
@@ -217,7 +217,7 @@ func TestForwardHTTP_Adaptive_HeaderDLPSignal(t *testing.T) {
 	// Send a request with a DLP secret in the Authorization header.
 	// Build at runtime to avoid gosec G101.
 	secret := "AKIA" + "IOSFODNN7EXAMPLE"
-	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/ok", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/ok", nil)
 	req.Header.Set("Authorization", "Bearer "+secret)
 	w := httptest.NewRecorder()
 
@@ -273,7 +273,7 @@ func TestForwardHTTP_Adaptive_BlockAllAfterCEE(t *testing.T) {
 
 	// Send a clean request. CEE entropy tracking on the URL path may push
 	// the session over the threshold, triggering block_all.
-	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/data?token="+"highentropy"+"stringhere123", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/data?token="+"highentropy"+"stringhere123", nil)
 	w := httptest.NewRecorder()
 
 	handler := p.buildHandler(http.NewServeMux())
@@ -463,7 +463,7 @@ func TestWebSocket_Adaptive_BlockAllOnClean(t *testing.T) {
 	// Build WS URL from upstream.
 	wsURL := strings.Replace(upstream.URL, "http://", "ws://", 1) + "/ws"
 
-	req := httptest.NewRequest(http.MethodGet, "/ws?url="+wsURL, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ws?url="+wsURL, nil)
 	w := httptest.NewRecorder()
 
 	mux := http.NewServeMux()

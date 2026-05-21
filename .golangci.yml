@@ -33,6 +33,12 @@ linters:
       - path: internal/config/schema\.go
         linters: [gosec]
         text: "G117"
+      # goconst and noctx fire on test fixtures (repeated literal test data,
+      # httptest.NewRequest helpers) where extracting constants or threading
+      # contexts hurts readability without finding real bugs. Both rules stay
+      # active on production code, where they catch maintainability issues.
+      - path: _test\.go$
+        linters: [goconst, noctx]
   settings:
     gosec:
       excludes:
@@ -42,6 +48,17 @@ linters:
         - G704 # SSRF via taint analysis
         - G705 # XSS via taint analysis — CLI terminal output, not web
         - G703 # Path traversal via taint analysis — paths are validated upstream
+    goconst:
+      # goconst v2.12 made the default (min-occurrences: 3, min-len: 3)
+      # much noisier without finding bugs. Raise both thresholds so the
+      # rule still surfaces egregious duplication of meaningfully-long
+      # strings — short tokens (install/remove/command/POST) and the
+      # prometheus namespace "pipelock" repeated across every metric file
+      # are routine API surfaces, not refactor opportunities. Truly
+      # repeated long strings (DLP pattern names, CIDR sentinels) still
+      # surface.
+      min-occurrences: 30
+      min-len: 12
     revive:
       rules:
         - name: var-naming
