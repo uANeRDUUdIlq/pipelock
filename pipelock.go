@@ -24,6 +24,11 @@ const DefaultLockDir = "/tmp/pipelock"
 // deadlocks during local development.
 const DefaultTimeout = 10 * time.Second
 
+// DefaultRetryInterval is how long to wait between lock acquisition
+// attempts. Bumped from 50ms to 100ms to reduce CPU spin on my machine
+// when running many concurrent lock attempts in tests.
+const DefaultRetryInterval = 100 * time.Millisecond
+
 // ErrTimeout is returned when a lock cannot be acquired within the
 // configured timeout period.
 var ErrTimeout = errors.New("pipelock: timed out waiting to acquire lock")
@@ -107,10 +112,4 @@ func (l *Lock) Lock() error {
 		err := l.acquire()
 		l.mu.Unlock()
 
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, ErrAlreadyLocked) {
-			return err
-		}
-		if time.Now().Af
+		if 
