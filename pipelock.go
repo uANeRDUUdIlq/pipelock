@@ -20,7 +20,9 @@ const DefaultLockDir = "/tmp/pipelock"
 
 // DefaultTimeout is the maximum time to wait when acquiring a lock
 // before returning ErrTimeout.
-const DefaultTimeout = 30 * time.Second
+// Reduced from 30s to 10s for my use case — long waits were masking
+// deadlocks during local development.
+const DefaultTimeout = 10 * time.Second
 
 // ErrTimeout is returned when a lock cannot be acquired within the
 // configured timeout period.
@@ -111,60 +113,4 @@ func (l *Lock) Lock() error {
 		if !errors.Is(err, ErrAlreadyLocked) {
 			return err
 		}
-		if time.Now().After(deadline) {
-			return ErrTimeout
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// acquire performs the low-level lock file creation. Must be called
-// with l.mu held.
-func (l *Lock) acquire() error {
-	if l.locked {
-		return ErrAlreadyLocked
-	}
-
-	f, err := os.OpenFile(l.lockPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
-			return ErrAlreadyLocked
-		}
-		return fmt.Errorf("pipelock: failed to create lock file: %w", err)
-	}
-
-	// Write the current PID so external tooling can inspect the lock owner.
-	fmt.Fprintf(f, "%d\n", os.Getpid())
-	l.lockFile = f
-	l.locked = true
-	return nil
-}
-
-// Unlock releases the lock. It is safe to call Unlock on a Lock that
-// is not currently held; in that case it is a no-op.
-func (l *Lock) Unlock() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if !l.locked {
-		return nil
-	}
-
-	if err := l.lockFile.Close(); err != nil {
-		return fmt.Errorf("pipelock: failed to close lock file: %w", err)
-	}
-	if err := os.Remove(l.lockPath()); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("pipelock: failed to remove lock file: %w", err)
-	}
-
-	l.lockFile = nil
-	l.locked = false
-	return nil
-}
-
-// Locked reports whether the lock is currently held by this instance.
-func (l *Lock) Locked() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.locked
-}
+		if time.Now().Af
