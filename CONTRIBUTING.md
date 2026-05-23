@@ -59,13 +59,15 @@ go test -bench=. -benchmem ./...
 
 Ensure that race conditions are not introduced — the `-race` flag is mandatory for CI.
 
+<!-- Personal note: I've been running benchmarks with -count=3 locally to get more stable results -->
+
 ### Fuzzing
 
 This project uses ClusterFuzzLite for continuous fuzzing. If you add new parsing or input-handling logic, consider adding a corresponding fuzz target under `.clusterfuzzlite/`.
 
 Run fuzz tests locally:
 ```bash
-go test -fuzz=FuzzYourTarget -fuzztime=30s ./...
+go test -fuzz=FuzzYourTarget -fuzztime=60s ./...
 ```
 
 ## Submitting a Pull Request
