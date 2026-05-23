@@ -83,6 +83,10 @@ Attempts to acquire a shared read lock without blocking. Returns `true` if succe
 - Only one goroutine can hold a **write lock** on a given key at a time.
 - A write lock cannot be acquired while any read locks are held, and vice versa.
 
+> **Note (personal):** I've found it useful to pair `TryLock` with a short retry loop and
+> `time.Sleep` backoff when contention is expected but a hard block is undesirable — avoids
+> goroutine stacking without needing a separate timeout context.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting issues and pull requests.
